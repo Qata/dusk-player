@@ -85,6 +85,7 @@ final class PlayerViewModel {
     var preferredAudioLanguage: String?
     var subtitleForcedOnly = false
     var autoSkipIntroMode: AutoSkipIntroMode = .alwaysExceptFirstEpisode
+    var isFirstEpisodeInSeason = false
     var autoSkipCountdownMarkerID: Int?
     var autoSkipHandler: (@MainActor (PlexMarker) -> Void)?
     /// Markers this episode has already skipped once, seeded from the
@@ -93,13 +94,9 @@ final class PlayerViewModel {
     /// auto-skip countdown: seeking back into the intro shows the button again,
     /// but the jump forward is the viewer's to make.
     @ObservationIgnored var spentAutoSkipMarkerIDs: Set<Int> = []
-    /// Fingerprint decisions completed for this episode. Unlike spent marker
-    /// IDs, this also includes first openings that played through.
-    @ObservationIgnored var resolvedIntroFingerprintMarkerIDs: Set<Int> = []
     /// Reports a newly spent auto-skip back to the coordinator, which owns the
     /// per-episode record.
     var autoSkipSpentHandler: (@MainActor (Int) -> Void)?
-    var introFingerprintResolvedHandler: (@MainActor (Int) -> Void)?
     /// Fires when the reached credits marker changes (nil when leaving the
     /// credits, e.g. a seek back before the marker). The player forwards it to
     /// the coordinator, which resolves the next episode and shows/hides the
@@ -153,6 +150,7 @@ final class PlayerViewModel {
     @ObservationIgnored var explicitTrackSelection: ExplicitTrackSelection?
     var serverSelectedAudioStreamID: Int?
     var serverSelectedSubtitleStreamID: Int?
+    var userTrackSelectionHandler: (@MainActor (PlexStreamType, Int?) -> Void)?
     var plexTrackSelectionHandler: (@MainActor (Int?, Int?) -> Void)?
     var pendingPlaybackState: PlaybackState?
     var pendingPlaybackStateExpiration: Date?
@@ -172,13 +170,6 @@ final class PlayerViewModel {
     @ObservationIgnored var controlsInteractionHoldCount = 0
     @ObservationIgnored nonisolated(unsafe) var seekFeedbackTask: Task<Void, Never>?
     @ObservationIgnored nonisolated(unsafe) var autoSkipCountdownTask: Task<Void, Never>?
-    @ObservationIgnored private(set) var introFingerprintStore: IntroFingerprintStore
-    @ObservationIgnored var introFingerprintSeasonKey: IntroFingerprintSeasonKey?
-    @ObservationIgnored var currentEpisodeRatingKey: String?
-    @ObservationIgnored var currentMediaType: PlexMediaType?
-    @ObservationIgnored var introFingerprintWindowStartTime: TimeInterval = 0
-    @ObservationIgnored var introFingerprintSamples: [IntroFrameSample] = []
-    @ObservationIgnored var introFrameSamplingTask: Task<Void, Never>?
     /// Preferences store used to persist the per-orientation zoom-to-fill
     /// choice. Set from `configureAutomaticTrackSelection` on appear.
     @ObservationIgnored var userPreferences: UserPreferences?
@@ -189,11 +180,9 @@ final class PlayerViewModel {
     init(
         engine: any PlaybackEngine,
         markers: [PlexMarker] = [],
-        liveTVContext: PlexLivePlaybackContext? = nil,
-        introFingerprintStore: IntroFingerprintStore? = nil
+        liveTVContext: PlexLivePlaybackContext? = nil
     ) {
         self.engine = engine
-        self.introFingerprintStore = introFingerprintStore ?? .shared
         self.engineView = engine.makePlayerView()
         self.lastPlayerViewGeneration = engine.playerViewGeneration
         self.markers = markers.sorted { $0.startTimeOffset < $1.startTimeOffset }
@@ -212,13 +201,14 @@ final class PlayerViewModel {
         syncTimer?.invalidate()
         controlsAutoHideTask?.cancel()
         seekFeedbackTask?.cancel()
-        cancelAutoSkipCountdown()
+        autoSkipCountdownTask?.cancel()
         syncTimer = nil
         controlsAutoHideTask = nil
         controlsAutoHideDeadline = nil
         controlsInteractionHoldCount = 0
         isControlsInteractionHeld = false
         seekFeedbackTask = nil
+        autoSkipCountdownTask = nil
         showQualityPicker = false
         bufferingPresentationHandler?(false)
         bufferingStartedAt = nil
@@ -243,8 +233,7 @@ final class PlayerViewModel {
         selectedSubtitleStreamID: Int? = nil,
         pendingExternalSubtitleStreamID: Int? = nil,
         explicitTrackSelection: ExplicitTrackSelection? = nil,
-        spentAutoSkipMarkerIDs: Set<Int> = [],
-        resolvedIntroFingerprintMarkerIDs: Set<Int> = []
+        spentAutoSkipMarkerIDs: Set<Int> = []
     ) {
         userPreferences = preferences
         // Apply the saved zoom-to-fill choice now that preferences are known.
@@ -263,27 +252,9 @@ final class PlayerViewModel {
         preferredAudioLanguage = Self.normalizedLanguageCode(preferences.defaultAudioLanguage)
         subtitleForcedOnly = preferences.subtitleForcedOnly
         subtitleFontSize = preferences.subtitleFontSize
-        let nextAutoSkipIntroMode = preferences.autoSkipIntroMode
-        let nextMediaType = mediaDetails?.type
-        let nextEpisodeRatingKey = mediaDetails?.type == .episode ? mediaDetails?.ratingKey : nil
-        let nextFingerprintSeasonKey = mediaDetails.flatMap {
-            IntroFingerprintSeasonKey(mediaDetails: $0)
-        }
-        let episodeChanged = currentMediaType != nextMediaType
-            || currentEpisodeRatingKey != nextEpisodeRatingKey
-            || introFingerprintSeasonKey != nextFingerprintSeasonKey
-        if episodeChanged || autoSkipIntroMode != nextAutoSkipIntroMode {
-            cancelAutoSkipCountdown()
-        }
-        if episodeChanged {
-            self.resolvedIntroFingerprintMarkerIDs = []
-        }
-        autoSkipIntroMode = nextAutoSkipIntroMode
-        currentMediaType = nextMediaType
-        currentEpisodeRatingKey = nextEpisodeRatingKey
-        introFingerprintSeasonKey = nextFingerprintSeasonKey
+        autoSkipIntroMode = preferences.autoSkipIntroMode
+        isFirstEpisodeInSeason = mediaDetails?.type == .episode && mediaDetails?.index == 1
         self.spentAutoSkipMarkerIDs = spentAutoSkipMarkerIDs
-        self.resolvedIntroFingerprintMarkerIDs = resolvedIntroFingerprintMarkerIDs
         hasConfiguredAutomaticTrackSelection = true
         hasAppliedAutomaticAudioSelection = false
         hasAppliedAutomaticSubtitleSelection = false

@@ -370,16 +370,6 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     @ObservationIgnored private var videoEnhancementRenderer: VideoEnhancementRenderer?
     @ObservationIgnored nonisolated(unsafe) private var rawVideoFrameSink: VLCKitVideoEnhancementFrameSink?
     @ObservationIgnored nonisolated(unsafe) private var rawVideoOutput: DuskVLCRawVideoOutput?
-    @ObservationIgnored private var introFrameSampleHandler: (@MainActor (IntroFrameSample) -> Void)?
-    @ObservationIgnored private var pendingIntroFrameSnapshot: PendingIntroFrameSnapshot?
-    @ObservationIgnored private var introFrameSnapshotTimeoutTask: Task<Void, Never>?
-    @ObservationIgnored private var introFrameSnapshotSamplingFailed = false
-
-    private struct PendingIntroFrameSnapshot {
-        let id: UUID
-        let path: URL
-        let mediaTime: TimeInterval
-    }
 
     /// Shared libvlc instance. On the stable 3.x line the iOS/tvOS audio
     /// output IS the classic pull-model AudioUnit module — the
@@ -465,7 +455,6 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     }
 
     func load(source: PlaybackSource) {
-        resetIntroFrameSnapshotState()
         loadValidationTask?.cancel()
         videoRefreshTask?.cancel()
         videoRefreshTask = nil
@@ -564,101 +553,6 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
             #endif
             renderingHost.attach(to: mediaPlayer, engine: self)
         }
-    }
-
-    func setIntroFrameSampleHandler(_ handler: (@MainActor (IntroFrameSample) -> Void)?) {
-        introFrameSampleHandler = handler
-        if handler == nil {
-            abandonPendingIntroFrameSnapshot()
-        }
-    }
-
-    func requestIntroFrameSample() {
-        guard introFrameSampleHandler != nil,
-              !introFrameSnapshotSamplingFailed,
-              pendingIntroFrameSnapshot == nil,
-              state == .playing else {
-            return
-        }
-
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dusk-intro-frame-\(UUID().uuidString)")
-            .appendingPathExtension("png")
-        let request = PendingIntroFrameSnapshot(
-            id: UUID(),
-            path: path,
-            mediaTime: currentTime
-        )
-        pendingIntroFrameSnapshot = request
-        mediaPlayer.saveVideoSnapshot(at: path.path, withWidth: 160, andHeight: 90)
-
-        introFrameSnapshotTimeoutTask?.cancel()
-        introFrameSnapshotTimeoutTask = Task { @MainActor [weak self] in
-            let deadline = Date().addingTimeInterval(2)
-            while Date() < deadline {
-                guard let self,
-                      self.pendingIntroFrameSnapshot?.id == request.id else {
-                    return
-                }
-                if let image = UIImage(contentsOfFile: request.path.path) {
-                    self.finishIntroFrameSnapshot(
-                        request,
-                        hash: IntroFrameHasher.hash(image: image)
-                    )
-                    return
-                }
-                do {
-                    try await Task.sleep(for: .milliseconds(100))
-                } catch {
-                    return
-                }
-            }
-            guard let self,
-                  self.pendingIntroFrameSnapshot?.id == request.id else { return }
-            self.introFrameSnapshotSamplingFailed = true
-            self.pendingIntroFrameSnapshot = nil
-            self.introFrameSnapshotTimeoutTask = nil
-            try? FileManager.default.removeItem(at: request.path)
-        }
-    }
-
-    private func finishIntroFrameSnapshot(
-        _ request: PendingIntroFrameSnapshot,
-        hash: UInt64?
-    ) {
-        guard pendingIntroFrameSnapshot?.id == request.id else { return }
-        pendingIntroFrameSnapshot = nil
-        introFrameSnapshotTimeoutTask?.cancel()
-        introFrameSnapshotTimeoutTask = nil
-        try? FileManager.default.removeItem(at: request.path)
-
-        guard let handler = introFrameSampleHandler,
-              let hash else {
-            return
-        }
-        handler(IntroFrameSample(mediaTime: request.mediaTime, hash: hash))
-    }
-
-    private func abandonPendingIntroFrameSnapshot() {
-        introFrameSnapshotTimeoutTask?.cancel()
-        introFrameSnapshotTimeoutTask = nil
-        if let request = pendingIntroFrameSnapshot {
-            try? FileManager.default.removeItem(at: request.path)
-            Task { @MainActor in
-                do {
-                    try await Task.sleep(for: .seconds(3))
-                } catch {
-                    return
-                }
-                try? FileManager.default.removeItem(at: request.path)
-            }
-        }
-        pendingIntroFrameSnapshot = nil
-    }
-
-    private func resetIntroFrameSnapshotState() {
-        setIntroFrameSampleHandler(nil)
-        introFrameSnapshotSamplingFailed = false
     }
 
     func play() {
@@ -790,7 +684,6 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     }
 
     func stop() {
-        resetIntroFrameSnapshotState()
         loadValidationTask?.cancel()
         loadValidationTask = nil
         videoRefreshTask?.cancel()
@@ -1106,17 +999,22 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     private struct ExternalSubtitleAttachment {
         enum Status {
             case pending
+            case preparing
             case applying
             case resolved
             case failed
         }
 
         let url: URL
+        let codec: String?
+        var playbackURL: URL?
         var status: Status = .pending
         /// The SPU elementary-stream index libvlc gave the slave, once its
         /// track has appeared in the player's track list.
         var esIndex: Int?
     }
+
+    @ObservationIgnored private var subtitleFileStore = SubtitleFileStore()
 
     var supportsExternalSubtitles: Bool { true }
 
@@ -1125,7 +1023,7 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     /// thread), which is why this returns acceptance rather than a track id:
     /// `availableSubtitleTracks` gains an entry carrying `externalURL == url`.
     @discardableResult
-    func attachExternalSubtitle(_ url: URL, select: Bool) -> Bool {
+    func attachExternalSubtitle(_ url: URL, codec: String?, select: Bool) -> Bool {
         guard currentSource != nil else { return false }
 
         if select {
@@ -1142,13 +1040,13 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
             case .failed:
                 externalSubtitleAttachments[existing].status = .pending
                 pumpExternalSubtitleAttachments()
-            case .pending, .applying:
+            case .pending, .preparing, .applying:
                 break
             }
             return true
         }
 
-        externalSubtitleAttachments.append(ExternalSubtitleAttachment(url: url))
+        externalSubtitleAttachments.append(ExternalSubtitleAttachment(url: url, codec: codec))
         vlcKitEngineLogger.notice(
             "VLCKit queued external subtitle slave (select=\(select, privacy: .public), queued=\(self.externalSubtitleAttachments.count, privacy: .public))"
         )
@@ -1166,18 +1064,46 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
         // slave list, and attributing elementary streams needs the container's
         // own tracks to be known first.
         guard currentSource != nil, state == .playing || state == .paused else { return }
-        guard !externalSubtitleAttachments.contains(where: { $0.status == .applying }) else { return }
+        guard !externalSubtitleAttachments.contains(where: { $0.status == .preparing || $0.status == .applying }) else { return }
         guard let next = externalSubtitleAttachments.firstIndex(where: { $0.status == .pending }) else {
             externalSubtitleAttachTask?.cancel()
             externalSubtitleAttachTask = nil
             return
         }
 
+        let attachment = externalSubtitleAttachments[next]
+        if let playbackURL = attachment.playbackURL {
+            mountExternalSubtitle(at: next, playbackURL: playbackURL)
+            return
+        }
+        externalSubtitleAttachments[next].status = .preparing
+        let store = subtitleFileStore
+        externalSubtitleAttachTask = Task { @MainActor [weak self] in
+            let playbackURL: URL
+            do {
+                playbackURL = try await store.prepare(attachment.url, codec: attachment.codec)
+            } catch {
+                guard !Task.isCancelled else { return }
+                // Preserve VLC's original delivery if fetching/detection fails.
+                // Never log the error: URLSession errors can include Plex tokens.
+                vlcKitEngineLogger.notice("Subtitle normalization unavailable; using original sidecar")
+                playbackURL = attachment.url
+            }
+            guard !Task.isCancelled, let self,
+                  self.externalSubtitleAttachments.indices.contains(next),
+                  self.externalSubtitleAttachments[next].url == attachment.url,
+                  self.externalSubtitleAttachments[next].status == .preparing else { return }
+            self.externalSubtitleAttachments[next].playbackURL = playbackURL
+            self.mountExternalSubtitle(at: next, playbackURL: playbackURL)
+        }
+    }
+
+    private func mountExternalSubtitle(at next: Int, playbackURL: URL) {
         captureEmbeddedSubtitleESIndexesIfNeeded()
         externalSubtitleAttachments[next].status = .applying
         let url = externalSubtitleAttachments[next].url
         let shouldSelect = pendingExternalSubtitleSelectionURL == url
-        let result = mediaPlayer.addPlaybackSlave(url, type: .subtitle, enforce: shouldSelect)
+        let result = mediaPlayer.addPlaybackSlave(playbackURL, type: .subtitle, enforce: shouldSelect)
         vlcKitEngineLogger.notice(
             "VLCKit adding subtitle slave (enforce=\(shouldSelect, privacy: .public), result=\(result, privacy: .public))"
         )
@@ -1296,6 +1222,7 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
         externalSubtitleAttachTask?.cancel()
         externalSubtitleAttachTask = nil
         externalSubtitleAttachments = []
+        subtitleFileStore = SubtitleFileStore()
         embeddedSubtitleESIndexes = nil
         pendingExternalSubtitleSelectionURL = nil
     }
@@ -2806,7 +2733,6 @@ extension VLCKitEngine: VLCMediaPlayerDelegate {
             self?.updateTime(timeMs: timeMs, lengthMs: lengthMs)
         }
     }
-
 }
 
 private struct VLCPlayerRepresentable: UIViewRepresentable {

@@ -261,6 +261,51 @@ so the whole live HUD is derived from one instant.
   There is deliberately no `aac` channel limitation — capping it would fight
   Plex's decision engine rather than widening what Dusk accepts.
 
+## Per-show Track Choices
+
+- Explicit audio/subtitle picker actions and downloaded-subtitle selection save
+  `ShowTrackPreferences` in UserDefaults, keyed by active Plex profile ID,
+  server machine ID, and the episode's **grandparent** rating key. Seasons share
+  the same record. Movies and Live TV never read or write it; no settings UI.
+- `ShowTrackDescriptor` matches language (canonical ISO codes/tags) and purpose
+  (forced, SDH, commentary, descriptive audio). Codec and channel count break
+  ties, then source order. Stream IDs are used only within the active part,
+  never persisted. Unknown language or a missing language/purpose match uses
+  existing automatic selection. A miss does not erase the saved choice.
+- Subtitles have three states: unspecified, explicitly Off, or a descriptor.
+  Off overrides forced/default/global subtitles too. Changing audio only keeps
+  the independently saved subtitle preference, and vice versa. Automatic picks,
+  decoder recovery and rejected-remux fallback never rewrite either preference.
+- Startup resolves the preference **before** AirPlay/remux/direct-play decisions
+  and VLCKit audio preselection. Local engines receive `ExplicitTrackSelection`;
+  remux/AirPlay use the resolved Plex IDs. Up Next and autoplay use the same
+  startup path; UserDefaults survives relaunch. PiP re-presentation retains the
+  effective selection. Profile changes invalidate in-flight startup and queued
+  Plex selection writes.
+- Plex's [stream-selection API](https://developer.plex.tv/pms/)
+  remembers selections per user/part (`subtitleStreamID=0` means Off), not a rich
+  rule for future episodes. Plex's account/show language auto-selection cannot
+  express this complete descriptor, so Dusk keeps the per-show rule locally and
+  best-effort syncs direct-play choices and resolved episodes through the existing
+  `selectStreams` PUT. The existing remux PUT remains mandatory before HLS
+  creation (including On → Off → On). All PUTs share a serialized queue in
+  `PlexService`; local downloads skip server writes. Per-show preferences are
+  device-local; another client can observe the per-part Plex selection, but
+  there is no Dusk per-show sync across devices.
+- tvOS's existing enhanced-SDR/embedded-subtitle routing receives the resolved
+  subtitle ID. Remembered SDR sidecars can start on VLCKit. HDR/DV never gains a
+  subtitle-induced VLC route: an unsupported remembered bitmap/ASS subtitle is
+  omitted from the HDR remux for that episode, without erasing the preference.
+  Remembered audio that cannot be copied is converted by Plex when needed to
+  preserve HDR. The existing remux conversion retention and declined-HDR-change
+  guard remain in charge of later track changes (the `a310f05` behavior).
+- `ShowTrackPreferenceTests` covers semantic matches across IDs/seasons,
+  forced/SDH distinctions, codec/channel ties, commentary/description, missing
+  matches, Off/relaunch, profile/server/show isolation, movie exclusion and
+  SDR versus HDR/DV routing. `PlaybackFallbackTests` also checks that explicit
+  Off waits until engine loading has finished before marking it applied.
+  Compile with `build-for-testing` to check test sources without executing tests or launching the app.
+
 ## Dolby Atmos and Spatial Audio
 
 - Why it exists: VLCKit decodes Dolby audio to plain PCM. That drops Atmos
@@ -287,9 +332,12 @@ so the whole live HUD is derived from one instant.
   target. Plex takes the session subtitle from the part's server-side
   selection, so `requestSpatialAudioRemux` first mirrors the audio/subtitle
   choice with `PUT /library/parts/{id}` (what Plex clients do on a track
-  change; skipped when it already matches) and requests `subtitles=auto`.
+  change; always written because the part metadata is a startup snapshot) and
+  requests `subtitles=auto` (`subtitles=none` plus an explicit selection of `0`
+  for Off). Never compare the requested selection with that stale snapshot.
   The session is accepted only when the decision's streams say video `copy`,
-  audio `copy`, and any subtitle `segments-subs`
+  audio `copy`, and any active subtitle `segments-subs`. A subtitle explicitly
+  marked `ignore` is also safe, even with `location=embedded`
   (`TranscodeStreamDecisions.isLosslessRemux`); anything else stops the Plex
   session and keeps plain direct play. It never lowers quality.
 - Atmos signaling (`Playback/RemuxHLSLoader.swift`): Plex's fMP4 muxer writes a
@@ -313,6 +361,10 @@ so the whole live HUD is derived from one instant.
   `ExplicitTrackSelection` (audio via `:audio-track` preselection, subtitle
   applied once by `PlayerViewModel`). The subtitle rendition in the HLS item is
   switched on by `PlayerViewModel` (`pendingServerSubtitleRenditionSelection`).
+  HDR/DV track changes that cannot rebuild the remux retain the loaded AVPlayer
+  session and restore its confirmed stream choices, with an error message.
+  They never fall back to VLC. `remuxTrackSelection` records the loaded choices
+  separately from an in-flight request, including across repeated On/Off picks.
 - The same session type carries the undecodable-audio fallback (video copied,
   audio converted by Plex); see "Dolby TrueHD decoding" below. The setting
   gates only the Dolby remux, not that fallback.
@@ -350,8 +402,11 @@ so the whole live HUD is derived from one instant.
   fails after starting goes to the server stream, not VLCKit.
 - Not yet verified against a real PMS: whether Plex already writes `dvcC` or
   `dvh1` itself (the patch then changes nothing) and whether it keeps the RPU
-  NAL units on copy. Picking a bitmap subtitle mid-session still leaves the
-  remux for VLCKit direct play.
+  NAL units on copy. Picking an unsupported subtitle mid-session keeps the
+  working remux and reports that the track change could not preserve HDR.
+  PMS logs (2026-10) confirmed an Off rebuild returning
+  copied video/audio plus `ignore/embedded` for the previous SRT. Rejecting that
+  harmless subtitle decision used to drop DV5 into VLC and produce pink video.
 - Verified (2026-09) against PMS 1.43.4 on tvOS/iPadOS simulators and a macOS
   AVPlayer harness: H.264 and HEVC/DV8 MKV remuxes copy both tracks, the
   patched init exposes the `ec+3` layers (7.1.4/9.1.6), WebVTT subtitles
@@ -381,8 +436,8 @@ so the whole live HUD is derived from one instant.
   (`requestSpatialAudioRemux`, session type `.spatialAudio`, lossless only,
   any failure → plain direct play). A file can qualify for Atmos, HDR or
   both; the session reason names what qualified, e.g. `Dolby Atmos + Dolby
-  Vision 8.1 via lossless Plex remux`. Picking a DTS track mid-session
-  leaves the remux for VLCKit direct play, like any non-copyable track.
+  Vision 8.1 via lossless Plex remux`. A declined track change (e.g. DTS audio)
+  keeps the working HDR remux and its previous tracks instead of moving to VLC.
 - Formats:
   - **HDR10 / HLG**: no signaling needed; the copied HEVC carries its VUI.
   - **HDR10+**: the ST 2094-40 SEI rides the copied bitstream and AVPlayer
@@ -962,6 +1017,48 @@ so the whole live HUD is derived from one instant.
   already listed by `syncTrackLists`'s server branch and selecting one just
   passes `subtitleStreamID` to the transcode decision, which burns it.
 
+### Subtitle character sets, fonts, and direction
+- Known text sidecars carry their Plex codec into `attachExternalSubtitle`.
+  `SubtitleFileStore` downloads the original bytes asynchronously, then
+  `SubtitleTextDecoder` recognizes Unicode BOMs/strict UTF-8 before using
+  Foundation's whole-file legacy encoding detector without lossy conversion.
+  A system Russian-language confidence check resolves the detector's observed
+  KOI8-R → ISO-8859-5 ambiguity. Automatic legacy detection remains heuristic;
+  short or ambiguous files can still require fixing the source encoding.
+- VLC mounts a temporary UTF-8 file with a BOM and the correct format suffix.
+  ASS/SSA headers, fonts, positioning, inline markup, logical RTL order, and cue
+  timing are preserved. The original Plex URL remains the attachment identity
+  used by track matching. Files survive media reopens and are removed when the
+  session's store is released. Fetch/decode failures retain original VLC
+  delivery; they never block video startup or log token-bearing errors.
+- Text formats currently normalized: SRT/SubRip, ASS/SSA, WebVTT, MicroDVD,
+  SubViewer, and SAMI. VobSub/PGS and unknown codecs bypass preparation entirely.
+  Never classify `.sub` by extension: it can contain text **or** bitmap data.
+- Do not force `subsdec-encoding=UTF-8` on the shared VLC library: that also
+  affects unnormalized inputs. libvlc 3.x only auto-detects UTF-8, with a
+  Windows-1252 fallback in this nonlocalized build. Container tracks declare
+  their own encoding (including UTF-8 Matroska text and UTF-8/UTF-16 tx3g).
+- Plex documents `/library/streams/{id}?encoding=utf-8`, but this is not a
+  reliable replacement for source detection. On the demo server (2026-10-17),
+  the generated Windows-1251, Windows-1256, and ISO-8859-2 samples returned
+  valid UTF-8 containing wrong characters. KOI8-R, GB18030, Big5, Shift-JIS,
+  Hebrew, Greek, Thai, and mixed UTF-8 converted correctly. Dusk deliberately
+  fetches original sidecars instead.
+- There is no Dusk text overlay. Both vendored VLC frameworks include FreeType's
+  CoreText family/fallback selectors, FriBidi and HarfBuzz; libass auto-selects
+  the Apple font provider and honors embedded fonts. Keep the existing
+  Helvetica Neue default and automatic paragraph direction. AVPlayer renders
+  tx3g/WebVTT and Plex remux captions natively; its text style rules set only
+  size, colors, and shadow, leaving font fallback and direction to Apple.
+  AirPlay/burned captions are rendered by Plex. No Latin typography changes or
+  bundled replacement font are needed for encoding correction.
+- `scripts/generate-subtitle-fixtures.py <directory>` creates mixed-script
+  SRT/ASS/WebVTT, legacy-encoded SRT/ASS/MicroDVD, and an expected-text manifest
+  without contacting Plex or launching a player. `SubtitleTextDecoderTests`
+  covers the legacy fixtures, Unicode BOMs, unchanged logical RTL/Latin text,
+  ASS markup, and bitmap/unknown-codec passthrough. Compile checks do not verify
+  actual glyph rasterization, shaping, or on-device playback.
+
 ### Dolby TrueHD decoding (TrueHD/MLP)
 - Dusk ships its OWN MobileVLCKit/TVVLCKit 3.7.3 build
   (`ci_scripts/build_vlckit.sh`, see `development-workflow.md` → "VLCKit
@@ -1435,7 +1532,8 @@ so the whole live HUD is derived from one instant.
   direct play or downloads. The actual engine selection determines rendering:
   - On tvOS, `StreamResolver.evaluateForDirectPlayback` prefers VLCKit for
     eligible SDR video when Auto/On and an embedded subtitle is selected.
-    Startup uses the same forced/language subtitle rule as the player; returning
+    Startup uses the resolved per-show choice or the same forced/language
+    subtitle rule as the player; returning
     to Original and leaving a remux use the current explicit choice when present.
     The view model also reports its actual automatic embedded-track choice,
     covering engine-discovered lists that differ from Plex's startup metadata.
@@ -1603,20 +1701,11 @@ so the whole live HUD is derived from one instant.
   Bar"). The playhead and thumbnail move during the swipe, but the video
   position keeps tracking actual playback until Select commits. If BIF loading
   or parsing fails, the controls keep their existing no-preview behavior.
-- Intro auto-skip honors `AutoSkipIntroMode`: off, always, or skip repeated
-  intros. The last setting keeps its existing stored value
-  (`alwaysExceptFirstEpisode`) for preference compatibility, but classifies
-  the opening of every episode. During its five-second countdown,
-  `PlayerViewModel` asks the active engine for low-rate frame samples and
-  compares their perceptual hashes with the season's local fingerprints. A
-  confident repeat can skip when the countdown ends; a new opening is stored
-  and plays through. The countdown starts only after playback begins and pauses
-  while playback is paused, buffering, or otherwise not active, so startup or
-  refill time cannot consume the frame-sampling window. Missing identity,
-  incomplete capture, or an ambiguous comparison fails open. Only the
-  repeated-intro mode samples frames; AVPlayer uses a video output and VLCKit
-  removes each temporary snapshot after hashing it. The player waits for saved
-  settings before arming and checks the mode again before a skip.
+- Intro auto-skip honors `AutoSkipIntroMode`: off, always, or always except
+  episode 1 of a season. The episode check comes from the active
+  `PlexMediaDetails.index`, so missing episode numbers are treated as not the
+  first episode. It waits for the player's saved settings to load before arming
+  a countdown and checks the current mode again before skipping.
 - **Auto-skip fires at most once per marker per playback session.** Skipping a
   marker — by countdown or by tapping Skip Intro — records its id in
   `PlaybackCoordinator.spentAutoSkipMarkerIDs`, and `updateAutoSkipState` never
@@ -1631,11 +1720,6 @@ so the whole live HUD is derived from one instant.
   an episode gets a fresh auto-skip. `PlayerViewModel` is seeded with it in
   `configureAutomaticTrackSelection` and reports new entries through
   `autoSkipSpentHandler`.
-- Repeated-intro classification also records its marker id in the coordinator
-  for the current item. This separate resolved set includes first, incomplete,
-  and ambiguous openings, so a quality or engine rebuild cannot classify the
-  same still-playing marker again and turn it into a repeat. It resets with the
-  item session and does not mean the marker was skipped.
 - Playback controls start visible for orientation, then `PlayerViewModel`
   owns one auto-hide deadline/task for the whole session. Sync arms it once
   playback has started, every user reveal resets it, and it keeps retrying
@@ -2007,8 +2091,8 @@ so the whole live HUD is derived from one instant.
 - Active UI defaults: intro auto-skip mode, credits auto-skip, double-tap seek,
   continuous play, and the iOS Episode Buttons (`playerEpisodeButtonsEnabled`,
   default off; no tvOS toggle).
-- New installs default to Skip Repeated Intros. The setting retains the legacy
-  `alwaysExceptFirstEpisode` stored value, so existing preferences are preserved.
+- New installs default intro auto-skip to always except episode 1 of each
+  season; existing stored intro-skip preferences are preserved.
 - `forceAVPlayer` and `forceVLCKit` are mutually exclusive in their setters.
 - `spatialAudioRemuxEnabled` (default on; "Dolby Atmos" on tvOS, "Dolby Atmos &
   Spatial Audio" on iOS, under Playback Advanced) gates the Atmos remux.

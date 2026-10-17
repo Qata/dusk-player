@@ -55,10 +55,6 @@ final class PlaybackCoordinator {
     /// (quality switch, delivery-ladder fallback, Picture in Picture restore);
     /// cleared when the next item's session commits.
     @ObservationIgnored var spentAutoSkipMarkerIDs: Set<Int> = []
-    /// Intro markers whose opening has already been classified during this
-    /// item. Kept separate from spent IDs because a first occurrence is played
-    /// through, yet must not be reclassified after an engine rebuild.
-    @ObservationIgnored var resolvedIntroFingerprintMarkerIDs: Set<Int> = []
     /// The Dolby Vision 7 → 8.1 conversion failed for the item now playing,
     /// so its remux is rebuilt (and kept) without it. Reset for each new item.
     @ObservationIgnored var isDolbyVision7ConversionSuppressed = false
@@ -72,6 +68,8 @@ final class PlaybackCoordinator {
     /// True while Plex prepares an AVPlayer HLS replacement after the user
     /// selects an AirPlay route during an active local session.
     var isPreparingAirPlay = false
+    @ObservationIgnored var showTrackPreferenceStore = ShowTrackPreferenceStore()
+    @ObservationIgnored var activeShowTrackScope: ShowTrackPreferenceStore.Scope?
     /// Plex stream selections that must survive local → AirPlay handoffs. Engine
     /// ids are implementation-local, so the player maps them back to these ids.
     var activeAudioStreamID: Int?
@@ -81,6 +79,9 @@ final class PlaybackCoordinator {
     /// audio stream must keep converting: the stream itself may be locally
     /// decodable (TrueHD on Dusk's VLCKit), so decodability cannot re-derive it.
     var remuxAudioConversion: RemuxAudioConversion?
+    /// Confirmed tracks in the loaded remux, retained while a new selection
+    /// is being prepared so a declined HDR track change can keep playing.
+    var remuxTrackSelection: ExplicitTrackSelection?
     /// Plex subtitle stream id to select as soon as the player can mount it.
     /// Set by the sidecar-download flow and by the AVPlayer → VLCKit switch,
     /// consumed by `PlayerViewModel.configureAutomaticTrackSelection`.
@@ -690,6 +691,7 @@ final class PlaybackCoordinator {
         playbackSource = nil
         debugInfo = nil
         activeItemDetails = nil
+        activeShowTrackScope = nil
         activeAudioStreamID = nil
         activeSubtitleStreamID = nil
         pendingExternalSubtitleStreamID = nil
@@ -742,12 +744,6 @@ final class PlaybackCoordinator {
     /// the credits poster when its auto-advance is armed or dismissed.
     func noteAutoSkipSpent(markerID: Int) {
         spentAutoSkipMarkerIDs.insert(markerID)
-    }
-
-    /// Records that fingerprint recognition finished for this intro marker.
-    /// Unlike a spent marker, this does not mean Dusk or the viewer skipped it.
-    func noteIntroFingerprintResolved(markerID: Int) {
-        resolvedIntroFingerprintMarkerIDs.insert(markerID)
     }
 
     /// Records the live play/pause state so the Up Next poster countdown can

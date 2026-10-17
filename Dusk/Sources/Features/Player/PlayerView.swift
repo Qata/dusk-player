@@ -708,6 +708,10 @@ private struct PlayerSessionView: View {
             viewModel.externalSubtitleRestartHandler = { streamID in
                 playback.switchToVLCKitForExternalSubtitle(streamID: streamID)
             }
+            viewModel.userTrackSelectionHandler = { type, streamID in
+                guard playback.playerPresentationID == presentationID else { return }
+                playback.rememberShowTrackChoice(type: type, streamID: streamID)
+            }
             viewModel.configureAutomaticTrackSelection(
                 preferences: preferences,
                 part: debugInfo?.part ?? mediaDetails?.media.first?.parts.first,
@@ -717,18 +721,14 @@ private struct PlayerSessionView: View {
                 selectedAudioStreamID: playback.activeAudioStreamID,
                 selectedSubtitleStreamID: playback.activeSubtitleStreamID,
                 pendingExternalSubtitleStreamID: playback.consumePendingExternalSubtitleStreamID(),
-                explicitTrackSelection: playback.consumePendingExplicitTrackSelection(),
-                spentAutoSkipMarkerIDs: playback.spentAutoSkipMarkerIDs,
-                resolvedIntroFingerprintMarkerIDs: playback.resolvedIntroFingerprintMarkerIDs
+                explicitTrackSelection: playback.consumePendingExplicitTrackSelection() ?? playback.rememberedShowTrackSelection(),
+                spentAutoSkipMarkerIDs: playback.spentAutoSkipMarkerIDs
             )
             viewModel.autoSkipHandler = { marker in
                 handleSkipMarker(marker)
             }
             viewModel.autoSkipSpentHandler = { markerID in
                 playback.noteAutoSkipSpent(markerID: markerID)
-            }
-            viewModel.introFingerprintResolvedHandler = { markerID in
-                playback.noteIntroFingerprintResolved(markerID: markerID)
             }
             viewModel.upNextPosterHandler = { creditsMarker in
                 handleReachedCreditsMarker(creditsMarker)
@@ -772,6 +772,7 @@ private struct PlayerSessionView: View {
         .onDisappear {
             viewModel.playbackSnapshotHandler = nil
             viewModel.upNextPosterHandler = nil
+            viewModel.userTrackSelectionHandler = nil
             viewModel.plexTrackSelectionHandler = nil
             viewModel.externalSubtitleRestartHandler = nil
             viewModel.cleanup()

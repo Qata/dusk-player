@@ -10,29 +10,10 @@ has a separate boundary documented in `docs/seerr-integration.md`.
   reporting, direct-play/transcode URLs, and image helpers.
 - `Models/` owns Plex response shapes plus app-level playback models.
 - `PlexService` is `@MainActor @Observable` and is injected from `DuskApp`.
-- Plex is the source of truth. Do not persist Plex content metadata beyond
-  explicit offline/download support.
-- The repeated-intro recognizer keeps a small derived cache in UserDefaults.
-  It stores the Plex server and season keys needed for isolation, versioned
-  perceptual hashes, and no descriptive item metadata or frame images; see the
-  playback flow below and `docs/playback.md`.
+- Plex is the source of truth. Do not persist metadata except for explicit
+  offline/download support.
 - No generic provider abstraction. Seerr is not a media provider. Add focused
   Plex methods in the existing same-type extension files.
-
-## Repeated-Intro Fingerprint Cache
-
-`IntroFingerprintStore` persists the signatures Dusk has learned while
-episodes play. Each entry is scoped to the Plex server machine identifier and
-season rating key. If either identity is missing, Dusk does not classify or
-skip automatically. The key prevents matches from crossing servers or seasons.
-
-The versioned UserDefaults archive contains each Plex server ID and season
-rating key, the schema and hash-algorithm versions, and low-resolution
-grayscale difference hashes with sample slots. Source frames are discarded
-after hashing. Entries survive playback sessions and app launches until local
-app data is removed. This cache is separate from the coordinator's per-session
-spent-marker and resolved-classification IDs. Unknown, incomplete, or
-ambiguous signatures never trigger a skip.
 
 ## Multi-Server Model
 Dusk is connected to **every enabled server at once**. There is no "current
