@@ -718,13 +718,17 @@ private struct PlayerSessionView: View {
                 selectedSubtitleStreamID: playback.activeSubtitleStreamID,
                 pendingExternalSubtitleStreamID: playback.consumePendingExternalSubtitleStreamID(),
                 explicitTrackSelection: playback.consumePendingExplicitTrackSelection(),
-                spentAutoSkipMarkerIDs: playback.spentAutoSkipMarkerIDs
+                spentAutoSkipMarkerIDs: playback.spentAutoSkipMarkerIDs,
+                resolvedIntroFingerprintMarkerIDs: playback.resolvedIntroFingerprintMarkerIDs
             )
             viewModel.autoSkipHandler = { marker in
                 handleSkipMarker(marker)
             }
             viewModel.autoSkipSpentHandler = { markerID in
                 playback.noteAutoSkipSpent(markerID: markerID)
+            }
+            viewModel.introFingerprintResolvedHandler = { markerID in
+                playback.noteIntroFingerprintResolved(markerID: markerID)
             }
             viewModel.upNextPosterHandler = { creditsMarker in
                 handleReachedCreditsMarker(creditsMarker)

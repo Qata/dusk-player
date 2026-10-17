@@ -410,9 +410,12 @@ extension PlayerViewModel {
         // re-arms the moment the position lands back inside the marker — which
         // happens on its own while a post-skip seek is still buffering, and
         // again whenever the viewer deliberately rewinds into the intro.
+        let hasAlreadyClassifiedIntro = shouldClassifyIntroFingerprint
+            && resolvedIntroFingerprintMarkerIDs.contains(marker.id)
         let shouldAutoSkip = marker.isIntro &&
             shouldAutoSkipIntroMarkers &&
-            !spentAutoSkipMarkerIDs.contains(marker.id)
+            !spentAutoSkipMarkerIDs.contains(marker.id) &&
+            !hasAlreadyClassifiedIntro
 
         guard shouldAutoSkip else {
             if autoSkipCountdownMarkerID != nil {
@@ -423,6 +426,15 @@ extension PlayerViewModel {
 
         // Already counting down for this marker
         if autoSkipCountdownMarkerID == marker.id { return }
+
+        // Repeated-intro classification needs samples from active playback.
+        // Player setup can enter this path while the engine is still loading;
+        // starting the timer then would spend the fingerprint window before
+        // the sampler is allowed to request any frames.
+        guard !shouldClassifyIntroFingerprint || (state == .playing && !isBuffering) else {
+            cancelAutoSkipCountdown()
+            return
+        }
 
         startAutoSkipCountdown(for: marker)
     }
@@ -629,6 +641,7 @@ extension PlayerViewModel {
         cancelAutoSkipCountdown()
         autoSkipCountdownMarkerID = marker.id
         autoSkipCountdownProgress = 0
+        startIntroFrameSampling(for: marker)
 
         autoSkipCountdownTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -641,7 +654,16 @@ extension PlayerViewModel {
                 if Task.isCancelled { return }
 
                 let now = Date()
-                if self.state == .paused {
+                if self.shouldClassifyIntroFingerprint,
+                   self.state == .stopped || self.state == .error {
+                    self.cancelAutoSkipCountdown()
+                    return
+                }
+
+                let shouldPauseForState = self.shouldClassifyIntroFingerprint
+                    ? (self.state != .playing || self.isBuffering)
+                    : self.state == .paused
+                if shouldPauseForState {
                     pausedAt = pausedAt ?? now
                     do {
                         try await Task.sleep(for: .milliseconds(50))
@@ -685,8 +707,34 @@ extension PlayerViewModel {
                 return
             }
 
-            self.autoSkipCountdownMarkerID = nil
-            self.autoSkipCountdownProgress = nil
+            var shouldSkip = true
+            if self.shouldClassifyIntroFingerprint,
+               let seasonKey = self.introFingerprintSeasonKey {
+                let candidate = IntroOpeningFingerprintMatcher.fingerprint(
+                    from: self.introFingerprintSamples,
+                    windowStartTime: self.introFingerprintWindowStartTime
+                )
+                let recognition = IntroOpeningFingerprintMatcher.recognize(
+                    candidate,
+                    among: self.introFingerprintStore.fingerprints(for: seasonKey)
+                )
+                self.noteIntroFingerprintResolved(for: marker)
+                switch recognition {
+                case .repeatOccurrence:
+                    break
+                case let .firstOccurrence(fingerprint):
+                    self.introFingerprintStore.insert(
+                        fingerprint,
+                        for: seasonKey
+                    )
+                    shouldSkip = false
+                case .ambiguous, .incomplete:
+                    shouldSkip = false
+                }
+            }
+
+            self.cancelAutoSkipCountdown()
+            guard shouldSkip else { return }
 
             if let handler = self.autoSkipHandler {
                 handler(currentMarker)
@@ -697,7 +745,58 @@ extension PlayerViewModel {
     }
 
     private var shouldAutoSkipIntroMarkers: Bool {
-        autoSkipIntroMode.shouldAutoSkipIntro(isFirstEpisodeInSeason: isFirstEpisodeInSeason)
+        switch autoSkipIntroMode {
+        case .off:
+            return false
+        case .always:
+            return true
+        case .alwaysExceptFirstEpisode:
+            // Keep the legacy behavior for known non-episode markers. Episodes
+            // and items without metadata need identity to classify safely.
+            guard let currentMediaType else { return false }
+            return currentMediaType != .episode || introFingerprintSeasonKey != nil
+        }
+    }
+
+    private var shouldClassifyIntroFingerprint: Bool {
+        autoSkipIntroMode == .alwaysExceptFirstEpisode
+            && currentMediaType == .episode
+            && currentEpisodeRatingKey != nil
+            && introFingerprintSeasonKey != nil
+    }
+
+    private func startIntroFrameSampling(for marker: PlexMarker) {
+        guard shouldClassifyIntroFingerprint else { return }
+
+        introFingerprintSamples = []
+        introFingerprintWindowStartTime = engine.currentTime
+        let windowStartTime = introFingerprintWindowStartTime
+        engine.setIntroFrameSampleHandler { [weak self] sample in
+            guard let self,
+                  self.autoSkipCountdownMarkerID == marker.id,
+                  sample.mediaTime >= windowStartTime,
+                  sample.mediaTime - windowStartTime < IntroOpeningFingerprintMatcher.sampleWindow else {
+                return
+            }
+            self.introFingerprintSamples.append(sample)
+        }
+
+        introFrameSamplingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self,
+                      self.autoSkipCountdownMarkerID == marker.id else {
+                    return
+                }
+                if self.state == .playing, !self.isBuffering {
+                    self.engine.requestIntroFrameSample()
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(800))
+                } catch {
+                    return
+                }
+            }
+        }
     }
 
     /// Burns this marker's one-shot auto-skip for the session and tells the
@@ -707,9 +806,18 @@ extension PlayerViewModel {
         autoSkipSpentHandler?(marker.id)
     }
 
+    private func noteIntroFingerprintResolved(for marker: PlexMarker) {
+        guard resolvedIntroFingerprintMarkerIDs.insert(marker.id).inserted else { return }
+        introFingerprintResolvedHandler?(marker.id)
+    }
+
     func cancelAutoSkipCountdown() {
         autoSkipCountdownTask?.cancel()
         autoSkipCountdownTask = nil
+        introFrameSamplingTask?.cancel()
+        introFrameSamplingTask = nil
+        engine.setIntroFrameSampleHandler(nil)
+        introFingerprintSamples = []
         autoSkipCountdownMarkerID = nil
         autoSkipCountdownProgress = nil
     }

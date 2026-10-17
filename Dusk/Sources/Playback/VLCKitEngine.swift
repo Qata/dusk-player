@@ -370,6 +370,16 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     @ObservationIgnored private var videoEnhancementRenderer: VideoEnhancementRenderer?
     @ObservationIgnored nonisolated(unsafe) private var rawVideoFrameSink: VLCKitVideoEnhancementFrameSink?
     @ObservationIgnored nonisolated(unsafe) private var rawVideoOutput: DuskVLCRawVideoOutput?
+    @ObservationIgnored private var introFrameSampleHandler: (@MainActor (IntroFrameSample) -> Void)?
+    @ObservationIgnored private var pendingIntroFrameSnapshot: PendingIntroFrameSnapshot?
+    @ObservationIgnored private var introFrameSnapshotTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private var introFrameSnapshotSamplingFailed = false
+
+    private struct PendingIntroFrameSnapshot {
+        let id: UUID
+        let path: URL
+        let mediaTime: TimeInterval
+    }
 
     /// Shared libvlc instance. On the stable 3.x line the iOS/tvOS audio
     /// output IS the classic pull-model AudioUnit module — the
@@ -455,6 +465,7 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     }
 
     func load(source: PlaybackSource) {
+        resetIntroFrameSnapshotState()
         loadValidationTask?.cancel()
         videoRefreshTask?.cancel()
         videoRefreshTask = nil
@@ -553,6 +564,101 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
             #endif
             renderingHost.attach(to: mediaPlayer, engine: self)
         }
+    }
+
+    func setIntroFrameSampleHandler(_ handler: (@MainActor (IntroFrameSample) -> Void)?) {
+        introFrameSampleHandler = handler
+        if handler == nil {
+            abandonPendingIntroFrameSnapshot()
+        }
+    }
+
+    func requestIntroFrameSample() {
+        guard introFrameSampleHandler != nil,
+              !introFrameSnapshotSamplingFailed,
+              pendingIntroFrameSnapshot == nil,
+              state == .playing else {
+            return
+        }
+
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dusk-intro-frame-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        let request = PendingIntroFrameSnapshot(
+            id: UUID(),
+            path: path,
+            mediaTime: currentTime
+        )
+        pendingIntroFrameSnapshot = request
+        mediaPlayer.saveVideoSnapshot(at: path.path, withWidth: 160, andHeight: 90)
+
+        introFrameSnapshotTimeoutTask?.cancel()
+        introFrameSnapshotTimeoutTask = Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(2)
+            while Date() < deadline {
+                guard let self,
+                      self.pendingIntroFrameSnapshot?.id == request.id else {
+                    return
+                }
+                if let image = UIImage(contentsOfFile: request.path.path) {
+                    self.finishIntroFrameSnapshot(
+                        request,
+                        hash: IntroFrameHasher.hash(image: image)
+                    )
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    return
+                }
+            }
+            guard let self,
+                  self.pendingIntroFrameSnapshot?.id == request.id else { return }
+            self.introFrameSnapshotSamplingFailed = true
+            self.pendingIntroFrameSnapshot = nil
+            self.introFrameSnapshotTimeoutTask = nil
+            try? FileManager.default.removeItem(at: request.path)
+        }
+    }
+
+    private func finishIntroFrameSnapshot(
+        _ request: PendingIntroFrameSnapshot,
+        hash: UInt64?
+    ) {
+        guard pendingIntroFrameSnapshot?.id == request.id else { return }
+        pendingIntroFrameSnapshot = nil
+        introFrameSnapshotTimeoutTask?.cancel()
+        introFrameSnapshotTimeoutTask = nil
+        try? FileManager.default.removeItem(at: request.path)
+
+        guard let handler = introFrameSampleHandler,
+              let hash else {
+            return
+        }
+        handler(IntroFrameSample(mediaTime: request.mediaTime, hash: hash))
+    }
+
+    private func abandonPendingIntroFrameSnapshot() {
+        introFrameSnapshotTimeoutTask?.cancel()
+        introFrameSnapshotTimeoutTask = nil
+        if let request = pendingIntroFrameSnapshot {
+            try? FileManager.default.removeItem(at: request.path)
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                } catch {
+                    return
+                }
+                try? FileManager.default.removeItem(at: request.path)
+            }
+        }
+        pendingIntroFrameSnapshot = nil
+    }
+
+    private func resetIntroFrameSnapshotState() {
+        setIntroFrameSampleHandler(nil)
+        introFrameSnapshotSamplingFailed = false
     }
 
     func play() {
@@ -684,6 +790,7 @@ final class VLCKitEngine: NSObject, PlaybackEngine {
     }
 
     func stop() {
+        resetIntroFrameSnapshotState()
         loadValidationTask?.cancel()
         loadValidationTask = nil
         videoRefreshTask?.cancel()
@@ -2699,6 +2806,7 @@ extension VLCKitEngine: VLCMediaPlayerDelegate {
             self?.updateTime(timeMs: timeMs, lengthMs: lengthMs)
         }
     }
+
 }
 
 private struct VLCPlayerRepresentable: UIViewRepresentable {

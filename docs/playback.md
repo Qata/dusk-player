@@ -1603,11 +1603,20 @@ so the whole live HUD is derived from one instant.
   Bar"). The playhead and thumbnail move during the swipe, but the video
   position keeps tracking actual playback until Select commits. If BIF loading
   or parsing fails, the controls keep their existing no-preview behavior.
-- Intro auto-skip honors `AutoSkipIntroMode`: off, always, or always except
-  episode 1 of a season. The episode check comes from the active
-  `PlexMediaDetails.index`, so missing episode numbers are treated as not the
-  first episode. It waits for the player's saved settings to load before arming
-  a countdown and checks the current mode again before skipping.
+- Intro auto-skip honors `AutoSkipIntroMode`: off, always, or skip repeated
+  intros. The last setting keeps its existing stored value
+  (`alwaysExceptFirstEpisode`) for preference compatibility, but classifies
+  the opening of every episode. During its five-second countdown,
+  `PlayerViewModel` asks the active engine for low-rate frame samples and
+  compares their perceptual hashes with the season's local fingerprints. A
+  confident repeat can skip when the countdown ends; a new opening is stored
+  and plays through. The countdown starts only after playback begins and pauses
+  while playback is paused, buffering, or otherwise not active, so startup or
+  refill time cannot consume the frame-sampling window. Missing identity,
+  incomplete capture, or an ambiguous comparison fails open. Only the
+  repeated-intro mode samples frames; AVPlayer uses a video output and VLCKit
+  removes each temporary snapshot after hashing it. The player waits for saved
+  settings before arming and checks the mode again before a skip.
 - **Auto-skip fires at most once per marker per playback session.** Skipping a
   marker — by countdown or by tapping Skip Intro — records its id in
   `PlaybackCoordinator.spentAutoSkipMarkerIDs`, and `updateAutoSkipState` never
@@ -1622,6 +1631,11 @@ so the whole live HUD is derived from one instant.
   an episode gets a fresh auto-skip. `PlayerViewModel` is seeded with it in
   `configureAutomaticTrackSelection` and reports new entries through
   `autoSkipSpentHandler`.
+- Repeated-intro classification also records its marker id in the coordinator
+  for the current item. This separate resolved set includes first, incomplete,
+  and ambiguous openings, so a quality or engine rebuild cannot classify the
+  same still-playing marker again and turn it into a repeat. It resets with the
+  item session and does not mean the marker was skipped.
 - Playback controls start visible for orientation, then `PlayerViewModel`
   owns one auto-hide deadline/task for the whole session. Sync arms it once
   playback has started, every user reveal resets it, and it keeps retrying
@@ -1993,8 +2007,8 @@ so the whole live HUD is derived from one instant.
 - Active UI defaults: intro auto-skip mode, credits auto-skip, double-tap seek,
   continuous play, and the iOS Episode Buttons (`playerEpisodeButtonsEnabled`,
   default off; no tvOS toggle).
-- New installs default intro auto-skip to always except episode 1 of each
-  season; existing stored intro-skip preferences are preserved.
+- New installs default to Skip Repeated Intros. The setting retains the legacy
+  `alwaysExceptFirstEpisode` stored value, so existing preferences are preserved.
 - `forceAVPlayer` and `forceVLCKit` are mutually exclusive in their setters.
 - `spatialAudioRemuxEnabled` (default on; "Dolby Atmos" on tvOS, "Dolby Atmos &
   Spatial Audio" on iOS, under Playback Advanced) gates the Atmos remux.

@@ -76,6 +76,9 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
     @ObservationIgnored private var videoEnhancementRequest: VideoEnhancementRequest = .disabled
     @ObservationIgnored private var videoEnhancementRenderer: VideoEnhancementRenderer?
     @ObservationIgnored private var enhancedVideoOutput: AVPlayerItemVideoOutput?
+    @ObservationIgnored private var introFrameSampleOutput: AVPlayerItemVideoOutput?
+    @ObservationIgnored private var introFrameSampleOutputItem: AVPlayerItem?
+    @ObservationIgnored private var introFrameSampleHandler: (@MainActor (IntroFrameSample) -> Void)?
     @ObservationIgnored private var needsEnhancedVideoRefresh = false
     private var isRenderingNativeSubtitles = false
     /// Front for `.spatialAudio` sessions (see `RemuxHLSLoader`). The
@@ -188,6 +191,7 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
     func load(source: PlaybackSource) {
         loadValidationTask?.cancel()
         stopDolbyVision7Proxy()
+        removeIntroFrameSampleOutput()
         removeEnhancedVideoOutput()
         removeTimeObserver()
         removePlaybackEndedObserver()
@@ -282,6 +286,48 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
         #endif
     }
 
+    func setIntroFrameSampleHandler(_ handler: (@MainActor (IntroFrameSample) -> Void)?) {
+        introFrameSampleHandler = handler
+        if handler == nil {
+            removeIntroFrameSampleOutput()
+        }
+    }
+
+    func requestIntroFrameSample() {
+        guard state == .playing,
+              let handler = introFrameSampleHandler,
+              let item = player.currentItem else {
+            return
+        }
+
+        let output: AVPlayerItemVideoOutput
+        if let existingOutput = introFrameSampleOutput,
+           introFrameSampleOutputItem === item {
+            output = existingOutput
+        } else {
+            removeIntroFrameSampleOutput()
+            let newOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ])
+            item.add(newOutput)
+            introFrameSampleOutput = newOutput
+            introFrameSampleOutputItem = item
+            output = newOutput
+        }
+
+        let itemTime = player.currentTime()
+        guard itemTime.isValid, itemTime.seconds.isFinite else { return }
+        guard let pixelBuffer = output.copyPixelBuffer(
+            forItemTime: itemTime,
+            itemTimeForDisplay: nil
+        ), let hash = IntroFrameHasher.hash(pixelBuffer: pixelBuffer) else {
+            return
+        }
+
+        handler(IntroFrameSample(mediaTime: itemTime.seconds, hash: hash))
+    }
+
     func play() {
         player.play()
     }
@@ -315,6 +361,7 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
         loadValidationTask?.cancel()
         loadValidationTask = nil
         stopDolbyVision7Proxy()
+        removeIntroFrameSampleOutput()
         removeEnhancedVideoOutput()
         player.pause()
         player.defaultRate = 1
@@ -394,6 +441,7 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
         }
 
         loadValidationTask?.cancel()
+        removeIntroFrameSampleOutput()
         removeEnhancedVideoOutput()
         removeTimeObserver()
         removePlaybackEndedObserver()
@@ -912,6 +960,15 @@ final class AVPlayerEngine: NSObject, PlaybackEngine {
         enhancedVideoOutput = nil
         needsEnhancedVideoRefresh = false
         videoEnhancementRenderer?.clear()
+    }
+
+    private func removeIntroFrameSampleOutput() {
+        if let output = introFrameSampleOutput,
+           let item = introFrameSampleOutputItem {
+            item.remove(output)
+        }
+        introFrameSampleOutput = nil
+        introFrameSampleOutputItem = nil
     }
 
     private func observeSubtitleSelection(for item: AVPlayerItem) {
