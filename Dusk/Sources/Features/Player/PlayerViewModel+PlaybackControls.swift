@@ -425,6 +425,7 @@ extension PlayerViewModel {
             return
         }
         guard marker.isIntro, shouldAutoSkipIntroMarkers,
+              !introOpeningSessionState.hasSkippedIntro,
               !spentAutoSkipMarkerIDs.contains(marker.id) else {
             logAutoSkipDecision(reason: autoSkipIntroMode == .off ? "mode-off" : "marker-ineligible-or-spent", marker: marker)
             cancelAutoSkipCountdown(reason: "marker-ineligible-or-spent")
@@ -687,6 +688,7 @@ extension PlayerViewModel {
                       self.shouldAutoSkipIntroMarkers, !self.shouldClassifyIntroFingerprint,
                       self.userPreferences?.autoSkipIntroMode == self.autoSkipIntroMode,
                       self.activeSkipMarker?.id == marker.id, !self.isScrubbing,
+                      !self.introOpeningSessionState.hasSkippedIntro,
                       !self.spentAutoSkipMarkerIDs.contains(marker.id) else { return }
                 let now = Date()
                 if self.state != .paused { elapsed += min(Self.maximumAutoSkipCountdownTick, now.timeIntervalSince(previous)) }
@@ -694,8 +696,7 @@ extension PlayerViewModel {
                 self.autoSkipCountdownProgress = min(1, elapsed / Self.autoSkipCountdownDuration)
                 if elapsed >= Self.autoSkipCountdownDuration {
                     self.cancelAutoSkipCountdown(reason: "unconditional-countdown-complete")
-                    if let handler = self.autoSkipHandler { handler(marker) }
-                    else { self.skipActiveMarker() }
+                    self.performAutomaticIntroSkip(for: marker)
                     return
                 }
                 do { try await Task.sleep(for: Self.autoSkipCountdownPollingInterval) }
@@ -725,9 +726,22 @@ extension PlayerViewModel {
             && introFingerprintSeasonKey != nil
     }
 
+    /// Claim the session's automatic skip before invoking a callback, which may
+    /// seek asynchronously or rebuild the player. Manual button taps bypass
+    /// this guard so a viewer can still choose to skip after rewinding.
+    func performAutomaticIntroSkip(for marker: PlexMarker) {
+        guard marker.isIntro, activeSkipMarker?.id == marker.id,
+              !introOpeningSessionState.hasSkippedIntro,
+              !spentAutoSkipMarkerIDs.contains(marker.id) else { return }
+        noteAutoSkipSpent(for: marker)
+        if let handler = autoSkipHandler { handler(marker) }
+        else { skipActiveMarker() }
+    }
+
     /// Burns this marker's one-shot auto-skip for the session and tells the
     /// coordinator, which keeps the record across player rebuilds.
     private func noteAutoSkipSpent(for marker: PlexMarker) {
+        if marker.isIntro { introOpeningSessionState.hasSkippedIntro = true }
         guard spentAutoSkipMarkerIDs.insert(marker.id).inserted else { return }
         autoSkipIntroLogger.notice(
             "Marker marked spent marker=\(marker.id) episode=\(self.currentEpisodeRatingKey ?? "unavailable", privacy: .public)"

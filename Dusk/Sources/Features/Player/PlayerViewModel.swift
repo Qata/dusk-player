@@ -310,6 +310,9 @@ final class PlayerViewModel {
         currentEpisodeRatingKey = nextEpisodeRatingKey
         introFingerprintSeasonKey = nextFingerprintSeasonKey
         self.spentAutoSkipMarkerIDs = spentAutoSkipMarkerIDs
+        if markers.contains(where: { $0.isIntro && spentAutoSkipMarkerIDs.contains($0.id) }) {
+            self.introOpeningSessionState.hasSkippedIntro = true
+        }
         self.resolvedIntroFingerprintMarkerIDs = resolvedIntroFingerprintMarkerIDs
         lastAutoSkipDiagnosticSnapshot = nil
         let markerSummary = markers.map {

@@ -105,6 +105,7 @@ extension PlayerViewModel {
               shouldClassifyIntroFingerprint,
               userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
               activeSkipMarker?.id == markerID,
+              !introOpeningSessionState.hasSkippedIntro,
               !spentAutoSkipMarkerIDs.contains(markerID), !isScrubbing,
               introOpeningSessionState.observations[markerID]?.canRecord == true else { return false }
         guard engine.isReadyForIntroFrameSampling else { return true }
@@ -123,6 +124,7 @@ extension PlayerViewModel {
               introFrameSamplingMarkerID == marker.id,
               activeSkipMarker?.id == marker.id,
               shouldClassifyIntroFingerprint,
+              !introOpeningSessionState.hasSkippedIntro,
               userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
               engine.isReadyForIntroFrameSampling, !isScrubbing,
               var observation = introOpeningSessionState.observations[marker.id] else { return }
@@ -139,7 +141,8 @@ extension PlayerViewModel {
     }
 
     private func scheduleIntroComparison(for marker: PlexMarker, generation: UUID) {
-        guard introFingerprintMatchingTask == nil,
+        guard !introOpeningSessionState.hasSkippedIntro,
+              introFingerprintMatchingTask == nil,
               let observation = introOpeningSessionState.observations[marker.id],
               let candidate = observation.candidate(at: engine.currentTime) else { return }
         let observationID = observation.id
@@ -156,6 +159,7 @@ extension PlayerViewModel {
                   self.engine.isReadyForIntroFrameSampling,
                   self.shouldClassifyIntroFingerprint,
                   self.userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
+                  !self.introOpeningSessionState.hasSkippedIntro,
                   !self.isScrubbing, !self.spentAutoSkipMarkerIDs.contains(marker.id),
                   var current = self.introOpeningSessionState.observations[marker.id] else { return }
             // Never confirm from a matrix superseded by a newer capture. The
@@ -175,8 +179,7 @@ extension PlayerViewModel {
                 // immediately before the existing one-shot skip action.
                 self.noteIntroFingerprintResolved(for: marker)
                 self.finishIntroObservation(reason: "confirmed-repeat", resolve: true)
-                if let handler = self.autoSkipHandler { handler(marker) }
-                else { self.skipActiveMarker() }
+                self.performAutomaticIntroSkip(for: marker)
             }
         }
     }

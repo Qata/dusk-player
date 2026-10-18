@@ -210,5 +210,7 @@ struct IntroOpeningObservation: Sendable {
 @MainActor
 final class IntroOpeningSessionState {
     let id = UUID()
+    /// Shared across player rebuilds; seeking back never restores auto-skip.
+    var hasSkippedIntro = false
     var observations: [Int: IntroOpeningObservation] = [:]
 }

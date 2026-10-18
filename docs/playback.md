@@ -1810,10 +1810,13 @@ so the whole live HUD is derived from one instant.
   `scripts/probe-intro-fingerprints.sh scripts/fixtures/apothecary-intros.json
   '/path/to/season'`. That mode requires ffmpeg; neither mode launches Dusk,
   a test runner or a simulator.
-- **Auto-skip fires at most once per marker per playback session.** Skipping a
-  marker — by countdown or by tapping Skip Intro — records its id in
-  `PlaybackCoordinator.spentAutoSkipMarkerIDs`, and `updateAutoSkipState` never
-  arms a countdown for a spent marker again. The button still appears, so the
+- **Intro auto-skip fires at most once per item playback session.** Recognition
+  and countdown completion share `performAutomaticIntroSkip`, which sets
+  `IntroOpeningSessionState.hasSkippedIntro` before invoking the skip callback.
+  Manual skips set the same flag. Seeking, reconfiguration and player/engine
+  rebuilds cannot restore that automatic skip, even if marker IDs change or a
+  callback delays its seek. Skipping also records the marker id in
+  `PlaybackCoordinator.spentAutoSkipMarkerIDs`. The button still appears, so the
   viewer can skip by hand as often as they like. Two failure modes this closes:
   a post-skip seek that is still buffering leaves the position inside the marker
   and used to re-arm the countdown immediately, and a deliberate rewind into the
@@ -1823,7 +1826,8 @@ so the whole live HUD is derived from one instant.
   cleared when the next session commits or the player is torn down, so reopening
   an episode gets a fresh auto-skip. `PlayerViewModel` is seeded with it in
   `configureAutomaticTrackSelection` and reports new entries through
-  `autoSkipSpentHandler`.
+  `autoSkipSpentHandler`. The shared session flag resets with
+  `introOpeningSessionState` when a new item commits or the player is torn down.
 - Repeated-intro classification also records its marker id in the coordinator
   for the current item. This separate resolved set includes first, incomplete,
   and ambiguous openings, so a quality or engine rebuild cannot classify the
