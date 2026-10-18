@@ -284,6 +284,12 @@ Pitfalls:
 - Pass the item's `serverID` through. A call that falls back to the primary for
   an item that came from another server reads the wrong library, and with
   colliding rating keys it can silently read the *wrong item*.
+- Watch-state writes and offline timeline replay pin `expectedSession` as well
+  as server identity. `rawServerRequest` checks it before sends and after auth/
+  endpoint recovery, so an outgoing profile cannot resume a write using the
+  replacement profile's connection. Intro-cache reset targets are captured
+  before unwatch and applied only after success in that same session; see
+  `playback.md` for lifetime/reconciliation rules.
 - Keep primary-account, active-account, and server-token usage distinct. Home
   membership/switch calls use the primary account, `plex.tv` resources use the
   active account, and per-server APIs use that server's token.

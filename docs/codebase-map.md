@@ -189,6 +189,9 @@ Player:
   sequence alignment, per-observation policy and the scoped recording cache.
   The coordinator retains observation state across player rebuilds. See
   `docs/playback.md` for thresholds, provenance and the offline media probe.
+  `PlexService+IntroFingerprints` resolves profile/server-scoped cache resets
+  around watch-state writes. `IntroFingerprintStore` owns reset generations,
+  persisted hierarchy/watch-state context and conservative season reconciliation.
 - `ShowTrackPreferences` owns semantic per-show track matching and profile/server/
   show-scoped persistence; `PlaybackCoordinator+ShowTracks` records explicit
   choices and syncs per-part selections to Plex. See `docs/playback.md`.

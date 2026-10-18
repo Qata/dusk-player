@@ -432,6 +432,11 @@ extension PlayerViewModel {
             return
         }
         if shouldClassifyIntroFingerprint {
+            guard isIntroFingerprintCacheCurrent else {
+                logAutoSkipDecision(reason: "fingerprint-cache-reset", marker: marker)
+                cancelAutoSkipCountdown(reason: "fingerprint-cache-reset")
+                return
+            }
             logAutoSkipDecision(
                 reason: engine.isReadyForIntroFrameSampling ? "intro-playback-ready" : "intro-waiting-for-playback",
                 marker: marker
@@ -731,6 +736,7 @@ extension PlayerViewModel {
     /// this guard so a viewer can still choose to skip after rewinding.
     func performAutomaticIntroSkip(for marker: PlexMarker) {
         guard marker.isIntro, activeSkipMarker?.id == marker.id,
+              !shouldClassifyIntroFingerprint || isIntroFingerprintCacheCurrent,
               !introOpeningSessionState.hasSkippedIntro,
               !spentAutoSkipMarkerIDs.contains(marker.id) else { return }
         noteAutoSkipSpent(for: marker)

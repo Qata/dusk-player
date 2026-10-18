@@ -1774,6 +1774,41 @@ so the whole live HUD is derived from one instant.
   stores episode, part, observation and playback-session provenance. It bounds
   each season to sixteen recordings and the archive to 2 MiB. Version-1/2 caches
   are ignored and relearned. No frames or videos persist in the app cache.
+- Intro cache lifetime is independent of season completion: finishing all
+  currently available episodes retains hashes, including for airing seasons.
+  Explicit season/show unwatch actions clear the affected profile/server scopes
+  only after the corresponding Plex write succeeds. Show resets include known
+  cached seasons plus children resolved before the write; alternates reset only
+  on servers where their write succeeds. Failed/unknown metadata never causes a
+  server-wide purge. Account sign-out clears its known Home profiles and cached
+  account-associated profiles; switching Home members retains their separate data.
+- `PlexService+IntroFingerprints` owns hierarchy registration and reset targets.
+  `IntroFingerprintStore` keeps optional, backward-compatible season context in
+  the version-3 archive (up to 256 contexts, 512 episode IDs per snapshot, still
+  within the 2 MiB archive cap). Existing recordings need no hash migration.
+  Each recording retains show/account ownership even if its context is evicted.
+  Episode edits update a persisted local watch-state overlay without clearing
+  season hashes. Offline queue replay never repeats cache resets; newer local
+  edits win over delayed retries. Known queued season/show resets apply once
+  at local acceptance. The existing aggregate detail actions still require Plex
+  success; this does not introduce offline season/show controls.
+- Resets advance an in-memory generation for each affected season. The current
+  item's generation is frozen in `IntroOpeningSessionState`, so sampling,
+  asynchronous comparison completion, automatic seeking and detach/checkpoint
+  saves reject invalidated references. That item plays through after a reset;
+  learning resumes in a new item session. Resetting the cache never restores a
+  session's spent intro skip.
+- A complete live `getEpisodes` response can detect a reset made elsewhere:
+  unchanged, nonempty membership must go from at least two watched episodes to
+  none. Partial/paginated/missing data, membership changes, single-episode changes
+  and an initially unwatched season are inconclusive. Local watch-state overlays
+  remain effective until Plex acknowledges them or a matching snapshot arrives,
+  preventing delayed sync from looking like another reset. Aggregate retries
+  also suppress their corresponding remote reset snapshot without deleting newer
+  hashes. Reads predating local changes and responses from an outgoing
+  profile are ignored. No extra polling or cross-device hash synchronization is
+  introduced; resets elsewhere become detectable on a later full season refresh,
+  and single-episode seasons require an explicit reset in Dusk.
 - `PlaybackCoordinator.introOpeningSessionState` retains continuous observations
   and their frozen reference sets across presentation/engine rebuilds. Current
   playback recordings are excluded even after a rebuild, preventing self-match.

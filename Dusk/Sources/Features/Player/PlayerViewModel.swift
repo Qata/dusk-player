@@ -309,6 +309,12 @@ final class PlayerViewModel {
         currentMediaType = nextMediaType
         currentEpisodeRatingKey = nextEpisodeRatingKey
         introFingerprintSeasonKey = nextFingerprintSeasonKey
+        if let key = nextFingerprintSeasonKey {
+            introFingerprintStore.registerSeason(key, showRatingKey: mediaDetails?.grandparentRatingKey)
+            if self.introOpeningSessionState.fingerprintCacheGeneration == nil {
+                self.introOpeningSessionState.fingerprintCacheGeneration = introFingerprintStore.generation(for: key)
+            }
+        }
         self.spentAutoSkipMarkerIDs = spentAutoSkipMarkerIDs
         if markers.contains(where: { $0.isIntro && spentAutoSkipMarkerIDs.contains($0.id) }) {
             self.introOpeningSessionState.hasSkippedIntro = true

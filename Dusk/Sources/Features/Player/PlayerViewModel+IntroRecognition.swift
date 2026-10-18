@@ -11,8 +11,13 @@ private enum IntroRecognitionConfiguration {
 }
 
 extension PlayerViewModel {
+    var isIntroFingerprintCacheCurrent: Bool {
+        guard let key = introFingerprintSeasonKey else { return false }
+        return introOpeningSessionState.fingerprintCacheGeneration == introFingerprintStore.generation(for: key)
+    }
+
     func updateIntroRecognition(for marker: PlexMarker) {
-        guard let seasonKey = introFingerprintSeasonKey,
+        guard isIntroFingerprintCacheCurrent, let seasonKey = introFingerprintSeasonKey,
               let episode = currentEpisodeRatingKey else { return }
         let now = engine.currentTime
         guard now.isFinite else { return }
@@ -103,6 +108,7 @@ extension PlayerViewModel {
         guard introFrameSamplingGeneration == generation,
               introFrameSamplingMarkerID == markerID,
               shouldClassifyIntroFingerprint,
+              isIntroFingerprintCacheCurrent,
               userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
               activeSkipMarker?.id == markerID,
               !introOpeningSessionState.hasSkippedIntro,
@@ -124,6 +130,7 @@ extension PlayerViewModel {
               introFrameSamplingMarkerID == marker.id,
               activeSkipMarker?.id == marker.id,
               shouldClassifyIntroFingerprint,
+              isIntroFingerprintCacheCurrent,
               !introOpeningSessionState.hasSkippedIntro,
               userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
               engine.isReadyForIntroFrameSampling, !isScrubbing,
@@ -141,7 +148,7 @@ extension PlayerViewModel {
     }
 
     private func scheduleIntroComparison(for marker: PlexMarker, generation: UUID) {
-        guard !introOpeningSessionState.hasSkippedIntro,
+        guard isIntroFingerprintCacheCurrent, !introOpeningSessionState.hasSkippedIntro,
               introFingerprintMatchingTask == nil,
               let observation = introOpeningSessionState.observations[marker.id],
               let candidate = observation.candidate(at: engine.currentTime) else { return }
@@ -158,6 +165,7 @@ extension PlayerViewModel {
             guard self.activeSkipMarker?.id == marker.id,
                   self.engine.isReadyForIntroFrameSampling,
                   self.shouldClassifyIntroFingerprint,
+                  self.isIntroFingerprintCacheCurrent,
                   self.userPreferences?.autoSkipIntroMode == .alwaysExceptFirstEpisode,
                   !self.introOpeningSessionState.hasSkippedIntro,
                   !self.isScrubbing, !self.spentAutoSkipMarkerIDs.contains(marker.id),
@@ -194,12 +202,12 @@ extension PlayerViewModel {
     }
 
     private func checkpointIntroObservation(markerID: Int, force: Bool) {
-        guard let key = introFingerprintSeasonKey,
+        guard isIntroFingerprintCacheCurrent, let key = introFingerprintSeasonKey,
               var observation = introOpeningSessionState.observations[markerID],
               observation.points.count > observation.persistedPointCount,
               force || observation.persistedPointCount == 0
                 || observation.points.count - observation.persistedPointCount >= IntroRecognitionConfiguration.checkpointFrameInterval else { return }
-        if introFingerprintStore.insert(observation.fingerprint, for: key) {
+        if introFingerprintStore.insert(observation.fingerprint, for: key, generation: introOpeningSessionState.fingerprintCacheGeneration) {
             observation.persistedPointCount = observation.points.count
             introOpeningSessionState.observations[markerID] = observation
         }

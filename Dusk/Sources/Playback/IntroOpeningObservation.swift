@@ -212,5 +212,7 @@ final class IntroOpeningSessionState {
     let id = UUID()
     /// Shared across player rebuilds; seeking back never restores auto-skip.
     var hasSkippedIntro = false
+    /// Frozen for this item so a cache reset cannot resume an old recording.
+    var fingerprintCacheGeneration: UUID?
     var observations: [Int: IntroOpeningObservation] = [:]
 }
